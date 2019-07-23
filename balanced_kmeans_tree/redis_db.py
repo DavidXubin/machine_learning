@@ -12,6 +12,8 @@ class RedisDBWrapper(object):
         pool = redis.ConnectionPool(host = host, port = port, decode_responses = True)
         self.__redis = redis.Redis(connection_pool = pool)
 
+    def getHandler(self):
+        return self.__redis
 
     def __save_chunk_data(self, data, key, index):
         """Store given Numpy array 'a' in Redis under key 'n'"""

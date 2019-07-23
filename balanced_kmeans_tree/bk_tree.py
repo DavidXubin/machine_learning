@@ -1,5 +1,7 @@
 import redis
 import random
+import time
+import queue
 import numpy as np
 from .redis_db import RedisDBWrapper
 from .fast_kmeans import FastKmeans
@@ -46,7 +48,7 @@ class BKTree(object):
     #参数 redis_host          : 指定用于存储簇数据的redis host
     #参数 redis_port          : 指定用于存储簇数据的redis port
     #参数 max_cluster_size    : 指定簇中数据的最大数量，是个软约束，如果不指定的话就默认是min_cluster_size的2倍
-    def __init__(self, max_clusters_per_run, max_depth, min_cluster_size, sc, redis_host, redis_port = 6379, max_cluster_size = 0):
+    def __init__(self, max_clusters_per_run, max_depth, min_cluster_size, sc, redis_host, redis_port = 6379, max_cluster_size = 0, balance = True):
         self.__max_clusters_per_run = max_clusters_per_run
         self.__max_depth = max_depth
         self.__min_cluster_size = min_cluster_size
@@ -55,8 +57,8 @@ class BKTree(object):
         self.__redis_host = redis_host
         self.__redis_port = redis_port
         self.__bkt_key = str(id(self))
+        self.__balance = balance
         self.__root_node = BKTNode()
-
         self.__redis = RedisDBWrapper(redis_host, redis_port)
 
     def get_root(self):
@@ -68,12 +70,31 @@ class BKTree(object):
     def get_redis(self):
         return self.__redis.getHandler()
 
+    def get_leaf_nodes(self):
+        leaf_nodes = []
+
+        q = queue.Queue()
+        q.put(self.__root_node)
+
+        while not q.empty():
+            node = q.get()
+
+            if node.leaf:
+                leaf_nodes.append(node)
+            else:
+                for child in node.children:
+                    q.put(child)
+
+        return leaf_nodes
+
+
     def dump(self):
 
         epochTime = int(time.mktime(time.localtime()))
 
         tree_params = self.__bkt_key + '_' + str(self.__max_clusters_per_run) + '_' + str(self.__max_depth) + '_' \
-                      + str(self.__min_cluster_size) + '_' + str(self.__max_cluster_size) + '_' + self.__root_node.id
+                      + str(self.__min_cluster_size) + '_' + str(self.__max_cluster_size) + '_' \
+                      + str(self.__balance) + '_' + self.__root_node.id
 
         self.get_redis().sadd('my_bkt', str(epochTime) + '_' + tree_params)
 
@@ -111,7 +132,7 @@ class BKTree(object):
     def update_centroid(self, node):
 
         if node.leaf:
-            data = self.__redis.get_data(bkt.__bkt_key + '_' + node.parent.id + '_' + str(node.cluster_id))
+            data = self.__redis.get_data(self.__bkt_key + '_' + node.parent.id + '_' + str(node.cluster_id))
             total_sum = data.sum(axis = 0)
             total_size = len(data)
 
@@ -147,7 +168,7 @@ class BKTree(object):
             if bkt_key == tree.split('_')[1]:
 
                 _, bkt_key, max_clusters_per_run, \
-                max_depth, min_cluster_size, max_cluster_size, root_id = tree.split('_')
+                max_depth, min_cluster_size, max_cluster_size, balance, root_id = tree.split('_')
 
                 found = True
                 break
@@ -156,7 +177,7 @@ class BKTree(object):
             return None
 
         bkt = BKTree(int(max_clusters_per_run), int(max_depth), int(min_cluster_size), \
-                     None, redis_host, redis_port, int(max_cluster_size))
+                     None, redis_host, redis_port, int(max_cluster_size), bool(balance))
 
         bkt.__bkt_key = bkt_key
         bkt.__redis = redis
@@ -274,6 +295,8 @@ class BKTree(object):
 
         self.adjust_tree_depth()
 
+        self.update_centroid(self.__root_node)
+
         return self.__root_node
 
     #构建balanced k-means tree的节点
@@ -300,8 +323,12 @@ class BKTree(object):
 
         #计算该节点中的数据还可以分成几个簇，如果只能分成2个簇，则做均分处理，否则进行一轮K-means聚类
         k = min(int(size / max_cluster_size + 1), self.__max_clusters_per_run)
-        if k == 2:
-            clusters = self.half_cut_cluster(data, self.__bkt_key + '_' + cur_node.id)
+
+        if self.__balance:
+            if k == 2:
+                clusters = self.half_cut_cluster(data, self.__bkt_key + '_' + cur_node.id)
+            else:
+                clusters = FastKmeans.fit(data, k, self.__redis_host, self.__redis_port, self.__sc, self.__bkt_key + '_' + cur_node.id)
         else:
             clusters = FastKmeans.fit(data, k, self.__redis_host, self.__redis_port, self.__sc, self.__bkt_key + '_' + cur_node.id)
 
@@ -310,7 +337,7 @@ class BKTree(object):
             return None
 
         #检查K-means聚类所产生的簇，将小于min_cluster_size的簇归并起来
-        if k > 2:
+        if k > 2 and self.__balance:
             clusters = self.merge_small_clusters(clusters, cur_node)
 
         #对聚类所形成的新簇递归构建子树
@@ -364,12 +391,13 @@ class BKTree(object):
         if len(to_merges) == 0:
             return clusters
 
-
         if len(to_merges) == len(clusters):
             clusters = []
+            new_cid = max([cluster[0] for cluster in to_merges]) + 1
+        else:
+            new_cid = max([cluster[0] for cluster in clusters]) + 1
 
         i = 0
-        new_cid = max([cluster[0] for cluster in clusters]) + 1
         new_clusters = []
 
         while i < len(to_merges):
