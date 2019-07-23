@@ -28,17 +28,17 @@ if __name__ == "__main__":
     spark_args["spark.executor.instances"] = str(1)
 
     pysparkmgr = PySparkMgr(spark_args)
-    _, spark, sc = pysparkmgr.start("xubin.xu")
+    spark, sc = pysparkmgr.start()
 
     if not spark:
         print("Spark session failed to launch")
         exit()
 
-    data = fvecs_read('sift/sift_learn.fvecs')[:1000].astype(np.float64)
+    data = fvecs_read('sift/sift_learn.fvecs').astype(np.float64)
 
-    RedisDBWrapper.CHUNK_SIZE = int(500000000 / 8 / data.shape[1])
+    RedisDBWrapper.CHUNK_SIZE = int(RedisDBWrapper.MAX_CHUNK_SIZE / data.shape[1])
 
-    bkt = BKTree(max_clusters_per_run = 5, max_depth = 4, min_cluster_size = 3, sc = sc, redis_host = "10.10.50.32")
+    bkt = BKTree(max_clusters_per_run = 10, max_depth = 5, min_cluster_size = 2500, sc = sc, redis_host = "10.10.50.32")
 
     bkt.build(data)
 
